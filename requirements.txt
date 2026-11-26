@@ -1,0 +1,10 @@
+# --- Core ---
+pytubefix>=8.0.0          # busca no YouTube + resolução de stream de áudio
+av>=18.0.0                # PyAV — decodifica AAC/Opus (traz FFmpeg embutido)
+sounddevice>=0.5.0        # saída de áudio via PortAudio (traz libportaudio embutida)
+numpy>=1.24.0             # buffers de áudio em arrays
+
+# --- Windows only ---
+# No Linux/macOS o módulo `curses` já vem com o Python.
+# No Windows ele precisa ser instalado à parte:
+windows-curses>=2.3.0; sys_platform == "win32"
