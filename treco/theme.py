@@ -1,77 +1,11 @@
-import os
-import time
-import sys
-import unicodedata
 import curses
+import sys
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_PATH = os.path.join(SCRIPT_DIR, "player_debug.log")
+from .logger import log
 
-
-def log(msg):
-    try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
-            f.flush()
-    except Exception:
-        pass
-
-
-def reset_log():
-    try:
-        if os.path.exists(LOG_PATH):
-            os.remove(LOG_PATH)
-    except Exception:
-        pass
-
-
-def wcswidth(s):
-    w = 0
-    for ch in s:
-        ea = unicodedata.east_asian_width(ch)
-        if ea in ("W", "F"):
-            w += 2
-        elif unicodedata.category(ch).startswith("C"):
-            continue
-        else:
-            w += 1
-    return w
-
-
-def truncate(s, width):
-    if width <= 0:
-        return ""
-    if wcswidth(s) <= width:
-        return s
-    result, w = "", 0
-    for ch in s:
-        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-        if w + cw + 1 > width:
-            break
-        result += ch
-        w += cw
-    return result + "…"
-
-
-def fmt_time(seconds):
-    try:
-        s = int(seconds)
-    except Exception:
-        return "--:--"
-    if s < 0:
-        return "--:--"
-    m, s = divmod(s, 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m:02d}:{s:02d}"
-
-
-# ---------- CORES ----------
 # No Windows, windows-curses passa o valor direto pro console em vez de traduzir
-# curses.COLOR_* -> Windows console attribute (é o que causa os swaps reportados).
-# Por isso usamos os atributos do Windows diretamente:
-#   Windows console: 0=black 1=blue 2=green 3=cyan 4=red 5=magenta 6=yellow 7=white
+# curses.COLOR_* -> Windows console attribute. Por isso usamos os atributos do
+# Windows diretamente:  0=black 1=blue 2=green 3=cyan 4=red 5=magenta 6=yellow 7=white
 if sys.platform == "win32":
     NAMED_COLORS = {
         "black": 0, "red": 4, "green": 2, "yellow": 6,
@@ -86,7 +20,6 @@ else:
     }
 
 COLOR_CYCLE = ["green", "cyan", "blue", "magenta", "yellow", "red", "white", "default"]
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _custom_slots_used = {}
 _next_custom_slot = 200
 
@@ -127,9 +60,7 @@ def resolve_color(value):
             if curses.can_change_color() and _next_custom_slot < 256:
                 slot = _next_custom_slot
                 _next_custom_slot += 1
-                curses.init_color(slot,
-                                  int(r * 1000 / 255),
-                                  int(g * 1000 / 255),
+                curses.init_color(slot, int(r * 1000 / 255), int(g * 1000 / 255),
                                   int(b * 1000 / 255))
                 _custom_slots_used[key] = slot
                 return slot
@@ -142,8 +73,8 @@ def resolve_color(value):
 class Theme:
     SLOTS = ["primary", "secondary", "accent", "error", "text"]
 
-    def __init__(self, config_manager):
-        self.config = config_manager
+    def __init__(self, config):
+        self.config = config
         self.has_colors = False
         self.refresh()
 
@@ -193,13 +124,7 @@ class Theme:
         except (ValueError, AttributeError):
             idx = -1
         new = COLOR_CYCLE[(idx + 1) % len(COLOR_CYCLE)]
-        if "appearance" not in self.config.data:
-            self.config.data["appearance"] = {}
-        self.config.data["appearance"][slot] = new
+        self.config.set("appearance", slot, new)
         self.config.save()
         self.reapply()
         return new
-
-
-def spinner_frame(t):
-    return SPINNER[int(t * 10) % len(SPINNER)]

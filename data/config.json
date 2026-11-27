@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "_about": "Cada cor pode ser: 'black','red','green','yellow','blue','magenta','cyan','white','default', um inteiro 0-255, ou RGB [r,g,b].",
+  "appearance": {
+    "primary": "white",
+    "secondary": "yellow",
+    "accent": "yellow",
+    "error": "red",
+    "text": "white"
+  },
+  "behavior": {
+    "visualizer_enabled": false,
+    "show_memory": true,
+    "history_limit": 50,
+    "home_cache_hours": 6,
+    "volume": 50,
+    "shuffle": false,
+    "repeat": "off"
+  }
+}

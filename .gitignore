@@ -76,6 +76,6 @@ venv.bak/
 
 ### project
 history.json
-player_debug.log
+player.log
 playlists.json
-mplayer.bat
+home_cache.json

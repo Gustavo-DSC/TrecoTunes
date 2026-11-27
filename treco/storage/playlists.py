@@ -1,79 +1,53 @@
-import json
-import os
 import time
 import uuid
-from core import log
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+from ..paths import HISTORY_FILE, PLAYLISTS_FILE
+from .jsonstore import read_json, write_json
+
+
+def _track(t):
+    return {
+        "title": t.get("title", "?"),
+        "url": t.get("url"),
+        "duration": t.get("duration", ""),
+    }
 
 
 class PlaylistManager:
+    """Playlists (data/playlists.json) e histórico de reprodução (data/history.json)."""
+
     def __init__(self, path=None, history_path=None):
-        self.path = path or os.path.join(SCRIPT_DIR, "playlists.json")
-        self.history_path = history_path or os.path.join(SCRIPT_DIR, "history.json")
+        self.path = str(path or PLAYLISTS_FILE)
+        self.history_path = str(history_path or HISTORY_FILE)
         self.playlists = []
         self.active_id = None
         self.history = []
-        self._load_or_create()
+        self._load_playlists()
         self._load_history()
 
-    def _load_or_create(self):
-        if not os.path.exists(self.path):
-            self._create_initial()
-            return
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self.playlists = data.get("playlists", [])
+    # ---------- persistência ----------
+    def _load_playlists(self):
+        data = read_json(self.path)
+        if isinstance(data, dict) and isinstance(data.get("playlists"), list) and data["playlists"]:
+            self.playlists = data["playlists"]
             self.active_id = data.get("active_id")
-            if not isinstance(self.playlists, list):
-                raise ValueError("playlists not a list")
-            if not self.playlists:
-                self._create_initial()
-            elif not self.active_id or not self.find(self.active_id):
+            if not self.active_id or not self.find(self.active_id):
                 self.active_id = self.playlists[0]["id"]
                 self._save()
-        except Exception as e:
-            log(f"playlists: invalid: {e}")
-            try:
-                os.replace(self.path, self.path + ".bak")
-            except Exception:
-                pass
+        else:
             self._create_initial()
 
     def _load_history(self):
-        if not os.path.exists(self.history_path):
-            self.history = []
-            return
-        try:
-            with open(self.history_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self.history = data.get("items", [])
-            if not isinstance(self.history, list):
-                self.history = []
-        except Exception as e:
-            log(f"history: invalid: {e}")
-            self.history = []
+        data = read_json(self.history_path)
+        items = data.get("items") if isinstance(data, dict) else None
+        self.history = items if isinstance(items, list) else []
 
     def _save(self):
-        try:
-            tmp = self.path + ".tmp"
-            data = {"version": 1, "playlists": self.playlists, "active_id": self.active_id}
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.path)
-        except Exception as e:
-            log(f"playlists write: {e}")
+        write_json(self.path, {"version": 1, "playlists": self.playlists,
+                               "active_id": self.active_id})
 
     def _save_history(self):
-        try:
-            tmp = self.history_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"version": 1, "items": self.history}, f,
-                          ensure_ascii=False, indent=2)
-            os.replace(tmp, self.history_path)
-        except Exception as e:
-            log(f"history write: {e}")
+        write_json(self.history_path, {"version": 1, "items": self.history})
 
     def _create_initial(self):
         self.playlists = []
@@ -82,6 +56,7 @@ class PlaylistManager:
         self.active_id = p["id"]
         self._save()
 
+    # ---------- playlists ----------
     def get_all(self):
         return self.playlists
 
@@ -109,24 +84,21 @@ class PlaylistManager:
 
     def delete_playlist(self, pid):
         self.playlists = [p for p in self.playlists if p["id"] != pid]
+        if not self.playlists:
+            self._create_initial()
+            return
         if self.active_id == pid:
-            self.active_id = self.playlists[0]["id"] if self.playlists else None
+            self.active_id = self.playlists[0]["id"]
         self._save()
 
     def add_track(self, pid, track):
         p = self.find(pid)
-        if not p:
-            return False
         url = track.get("url")
-        if not url:
+        if not p or not url:
             return False
         if any(t.get("url") == url for t in p["tracks"]):
             return False
-        p["tracks"].append({
-            "title": track.get("title", "?"),
-            "url": url,
-            "duration": track.get("duration", ""),
-        })
+        p["tracks"].append(_track(track))
         self._save()
         return True
 
@@ -166,14 +138,10 @@ class PlaylistManager:
         if not url:
             return
         self.history = [h for h in self.history if h.get("url") != url]
-        self.history.insert(0, {
-            "title": track.get("title", "?"),
-            "url": url,
-            "duration": track.get("duration", ""),
-            "played_at": time.time(),
-        })
-        if len(self.history) > limit:
-            self.history = self.history[:limit]
+        entry = _track(track)
+        entry["played_at"] = time.time()
+        self.history.insert(0, entry)
+        del self.history[max(1, int(limit)):]
         self._save_history()
 
     def get_history(self, limit=20):
