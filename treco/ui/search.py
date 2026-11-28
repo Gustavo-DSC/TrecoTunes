@@ -1,5 +1,6 @@
 import curses
 import threading
+import time
 
 from ..utils import spinner_frame
 from .base import Screen
@@ -32,6 +33,9 @@ class SearchScreen(Screen):
         my_id = self._req
 
         def worker():
+            time.sleep(0.12)                      # buscas em sequência: só a última vai à rede
+            if my_id != self._req:
+                return
             results = self.app.youtube.search(text, total=50)
             if my_id != self._req:
                 return

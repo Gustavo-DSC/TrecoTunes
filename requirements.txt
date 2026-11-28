@@ -1,8 +1,10 @@
 # --- Core ---
 pytubefix>=8.0.0          # busca no YouTube + resolução de stream de áudio
-av>=18.0.0                # PyAV — decodifica AAC/Opus (traz FFmpeg embutido)
+av>=18.0.0                # PyAV — decodifica AAC/Opus e converte p/ PCM (traz FFmpeg embutido)
 sounddevice>=0.5.0        # saída de áudio via PortAudio (traz libportaudio embutida)
-numpy>=1.24.0             # buffers de áudio em arrays
+
+# audioop saiu do Python 3.13; este pacote devolve (volume e visualizador usam ele)
+audioop-lts>=0.2.1; python_version >= "3.13"
 
 # --- Windows only ---
 # No Linux/macOS o módulo `curses` já vem com o Python.

@@ -1,11 +1,16 @@
-"""Reprodução de áudio em uma thread própria.
+"""Reprodução de áudio em uma thread própria (sem numpy).
 
-As bibliotecas pesadas (av, numpy, sounddevice) só são importadas na primeira vez
+As bibliotecas pesadas (av, sounddevice) só são importadas na primeira vez
 que uma música realmente toca — assim o app aberto, sem tocar nada, fica leve.
+
+Fluxo: PyAV decodifica -> AudioResampler já entrega PCM int16 estéreo na taxa da
+placa -> audioop aplica o volume -> sounddevice (RawOutputStream) toca os bytes.
 """
+import math
 import threading
 import time
 import traceback
+from array import array
 
 from ..logger import log
 
@@ -29,6 +34,7 @@ class AudioPlayer:
         self.gen = 0                # identifica a "sessão" de reprodução atual
 
         self._thread = None
+        self._out = None            # stream de saída atual (para cortar o antigo ao trocar de faixa)
         self._stop = threading.Event()
         self._seek_req = None
         self._lock = threading.Lock()
@@ -40,7 +46,16 @@ class AudioPlayer:
 
     def open(self, url, start=0.0, duration_hint=0.0):
         """Começa a tocar `url` (descartando o que estava tocando, sem travar a UI)."""
+        old_thread, old_out = self._thread, self._out
         self._stop.set()                       # avisa a thread antiga para sair
+        if old_out is not None:
+            try:
+                old_out.abort()                # destrava uma escrita pendente e corta o som antigo
+            except Exception:
+                pass
+        if (old_thread is not None and old_thread.is_alive()
+                and old_thread is not threading.current_thread()):
+            old_thread.join(timeout=0.4)       # não deixa threads/streams velhos acumulando
         self._stop = threading.Event()
         self.gen += 1
         self.url = url
@@ -109,23 +124,25 @@ class AudioPlayer:
     def _open_output(self, sd, sample_rate):
         last_err = None
         for sr in (sample_rate, 48000, 44100, 22050):
-            for dt in ("float32", "int16"):
-                try:
-                    stream = sd.OutputStream(samplerate=sr, channels=2, dtype=dt,
-                                             blocksize=BLOCK)
-                    stream.start()
-                    log(f"OUT OK sr={sr} dtype={dt}")
-                    return stream, sr, dt
-                except Exception as e:
-                    last_err = e
+            try:
+                stream = sd.RawOutputStream(samplerate=sr, channels=2, dtype="int16",
+                                            blocksize=BLOCK)
+                stream.start()
+                log(f"OUT OK sr={sr}")
+                return stream, sr
+            except Exception as e:
+                last_err = e
         raise _DeviceError(f"sem saída de áudio ({str(last_err)[:60]})")
 
     def _run(self, gen, stop, url):
         container = out = None
         try:
             import av
-            import numpy as np
             import sounddevice as sd
+            try:
+                import audioop                      # Python <= 3.12
+            except ImportError:                     # 3.13+: pip install audioop-lts
+                raise RuntimeError("falta o pacote audioop-lts (pip install audioop-lts)")
 
             log(f"LOOP abrindo {url[:100]}")
             container = av.open(url, timeout=15.0)
@@ -138,24 +155,48 @@ class AudioPlayer:
             except Exception:
                 pass
 
-            cc = stream.codec_context
-            src_sr = cc.sample_rate or 48000
-            src_ch = 2
             try:
-                if cc.layout is not None:
-                    src_ch = cc.layout.nb_channels
+                stream.thread_type = "NONE"      # sem threads extras de decodificação (menos RAM)
             except Exception:
                 pass
-            out, sr, dtype = self._open_output(sd, src_sr)
-            spectrum = _Spectrum(np, BANDS)
+
+            src_sr = stream.codec_context.sample_rate or 48000
+            out, sr = self._open_output(sd, src_sr)
+            self._out = out
+
+            def new_resampler():
+                # qualquer formato/canais -> int16 estéreo na taxa da placa
+                return av.AudioResampler(format="s16", layout="stereo", rate=sr)
+
+            resampler = new_resampler()
+            spectrum = _Spectrum(BANDS)
             written = 0
-            last_beat = time.time()
+            last_beat = last_viz = time.time()
 
             def do_seek(target):
-                nonlocal written
+                nonlocal written, resampler
                 container.seek(int(target / stream.time_base), stream=stream)
+                resampler = new_resampler()          # descarta o que sobrou do trecho antigo
                 written = int(target * sr)
                 self.time_pos = target
+
+            def play(rframe):
+                """Toca um frame já em s16 estéreo. Retorna False se deve parar."""
+                nonlocal written, last_viz
+                n = rframe.samples
+                if n <= 0:
+                    return True
+                pcm = bytes(memoryview(rframe.planes[0])[:n * 4])   # 2 canais * 2 bytes, uma só cópia
+                now = time.time()
+                if self.viz_enabled and now - last_viz > 0.04:
+                    last_viz = now
+                    self.levels = spectrum.update(pcm, sr, self.levels, audioop)
+                vol = self.effective_volume
+                out.write(audioop.mul(pcm, 2, vol) if vol != 1.0 else pcm)
+                written += n
+                self.time_pos = written / sr
+                self.stage = "streaming"
+                return not stop.is_set()
 
             first = self._take_seek()
             if first is not None:
@@ -180,34 +221,34 @@ class AudioPlayer:
                     continue
 
                 try:
-                    pcm = _to_stereo(np, frame, src_ch)          # float32 (n, 2) em [-1, 1]
+                    rframes = resampler.resample(frame)
                 except Exception as e:
-                    log(f"to_ndarray: {e}")
+                    log(f"resample: {e}")
                     continue
-                if pcm.shape[0] == 0:
+                if rframes is None:
                     continue
-                if sr != src_sr and pcm.shape[0] > 1:            # placa não aceitou a taxa
-                    ratio = sr / src_sr
-                    idx = (np.arange(int(pcm.shape[0] * ratio)) / ratio).astype(int)
-                    pcm = pcm[idx]
-                if self.viz_enabled:
-                    self.levels = spectrum.update(pcm, sr, self.levels)
-                vol = self.effective_volume
-                buf = pcm * vol if vol != 1.0 else pcm
-                if dtype == "int16":
-                    buf = np.clip(buf * 32767, -32768, 32767).astype(np.int16)
-                out.write(np.ascontiguousarray(buf))
-                written += pcm.shape[0]
-                if stop.is_set():
+                if not isinstance(rframes, (list, tuple)):    # versões antigas do PyAV
+                    rframes = [rframes]
+                keep = True
+                for rf in rframes:
+                    if not play(rf):
+                        keep = False
+                        break
+                if not keep:
                     break
-                self.time_pos = written / sr
-                self.stage = "streaming"
 
                 if time.time() - last_beat > 30:
                     log(f"heartbeat pos={self.time_pos:.1f}s ram={_ram()}")
                     last_beat = time.time()
 
             if not stop.is_set():
+                try:                                           # sobra do resampler
+                    tail = resampler.resample(None)
+                    if tail is not None:
+                        for rf in (tail if isinstance(tail, (list, tuple)) else [tail]):
+                            play(rf)
+                except Exception:
+                    pass
                 self.stage = "done"
         except Exception as e:
             if not stop.is_set():
@@ -216,6 +257,8 @@ class AudioPlayer:
                 self.stage = "error"
             log(f"LOOP EXC: {e}\n{traceback.format_exc()}")
         finally:
+            if self._out is out:
+                self._out = None
             try:
                 if out is not None:
                     if stop.is_set():
@@ -247,61 +290,53 @@ def _ram():
         return "?"
 
 
-def _to_stereo(np, frame, src_ch):
-    """Converte um frame decodificado (planar/packed, int/float, mono/5.1) em float32 estéreo."""
-    arr = frame.to_ndarray()
-    name = frame.format.name
-    if name.endswith("p"):                      # planar: (canais, amostras)
-        pcm = arr.T
-    else:                                       # packed: (1, amostras*canais)
-        pcm = arr.reshape(-1, max(1, src_ch))
-    if name.startswith("s16"):
-        pcm = pcm.astype(np.float32) / 32768.0
-    elif name.startswith("s32"):
-        pcm = pcm.astype(np.float32) / 2147483648.0
-    elif name.startswith("u8"):
-        pcm = (pcm.astype(np.float32) - 128.0) / 128.0
-    else:
-        pcm = pcm.astype(np.float32, copy=False)
-    if pcm.shape[1] == 1:
-        pcm = np.repeat(pcm, 2, axis=1)
-    elif pcm.shape[1] > 2:
-        pcm = pcm[:, :2]
-    return pcm
-
-
 class _Spectrum:
-    """Espectro barato para o visualizador: banda = |projeção| em senos/cossenos (matmul).
+    """Visualizador simples, só para enfeite: Goertzel em Python puro.
 
-    Evita np.fft de propósito (nenhum plano/cache interno é criado a cada chamada).
+    Pega 512 amostras, junta de 4 em 4 (128 pontos, ~12 kHz) e mede a energia de
+    BANDS frequências (60 Hz até ~5 kHz). Custa ~1 ms por chamada e roda no máximo
+    uns 25 vezes por segundo.
     """
     N = 512
+    DEC = 4
 
-    def __init__(self, np, bands):
-        self.np, self.bands = np, bands
+    def __init__(self, bands):
+        self.bands = bands
         self.sr = None
-        self.win = np.hanning(self.N).astype(np.float32)
-        self.tilt = np.linspace(0, 8, bands).astype(np.float32)
+        self.coefs = []
+        m = self.N // self.DEC
+        self.win = [0.5 - 0.5 * math.cos(2 * math.pi * i / (m - 1)) for i in range(m)]
+        self.norm = 2.0 / sum(self.win)
+        self.tilt = [8.0 * i / max(1, bands - 1) for i in range(bands)]
 
     def _build(self, sr):
-        np = self.np
-        freqs = np.geomspace(60, min(14000, sr / 2.2), self.bands)
-        t = np.arange(self.N, dtype=np.float64) / sr
-        ang = 2 * np.pi * freqs[:, None] * t[None, :]
-        w = self.win[None, :]
-        self.cos = (np.cos(ang) * w).astype(np.float32)
-        self.sin = (np.sin(ang) * w).astype(np.float32)
-        self.norm = 2.0 / float(self.win.sum())
+        eff = sr / self.DEC
+        lo, hi = 60.0, min(5500.0, eff / 2.2)
+        ratio = (hi / lo) ** (1.0 / max(1, self.bands - 1))
+        self.coefs = [2.0 * math.cos(2 * math.pi * (lo * ratio ** i) / eff)
+                      for i in range(self.bands)]
         self.sr = sr
 
-    def update(self, pcm, sr, old):
-        np = self.np
-        if pcm.shape[0] < self.N:
+    def update(self, pcm, sr, old, audioop):
+        """pcm: bytes int16 estéreo. Devolve a lista de níveis (0..1) das barras."""
+        need = self.N * 4
+        if len(pcm) < need:
             return old
         if sr != self.sr:
             self._build(sr)
-        seg = pcm[:self.N].mean(axis=1)
-        mag = np.hypot(self.cos @ seg, self.sin @ seg) * self.norm     # ~amplitude da banda
-        db = 20.0 * np.log10(mag + 1e-6)
-        new = np.clip((db + 52.0 + self.tilt) / 46.0, 0.0, 1.0)
-        return [float(max(a, b * 0.82)) for a, b in zip(new, old)]
+        samples = array("h")
+        samples.frombytes(audioop.tomono(pcm[:need], 2, 0.5, 0.5))
+        k = 1.0 / (self.DEC * 32768.0)
+        d = [(samples[i] + samples[i + 1] + samples[i + 2] + samples[i + 3]) * k * w
+             for i, w in zip(range(0, self.N, self.DEC), self.win)]
+        norm, log10, sqrt = self.norm, math.log10, math.sqrt
+        new = []
+        for c, tilt in zip(self.coefs, self.tilt):
+            s1 = s2 = 0.0
+            for x in d:
+                s1, s2 = x + c * s1 - s2, s1
+            p = s1 * s1 + s2 * s2 - c * s1 * s2
+            mag = sqrt(p) * norm if p > 0 else 0.0
+            v = (20.0 * log10(mag + 1e-6) + 52.0 + tilt) / 46.0
+            new.append(0.0 if v < 0 else 1.0 if v > 1 else v)
+        return [max(a, b * 0.82) for a, b in zip(new, old)]

@@ -75,6 +75,9 @@ class PlayerApp:
 
         self._mem_label = ""
         self._mem_time = 0.0
+        self.trim_on = True
+        self._trim_t = time.time()
+        self._trim_gen = -1
 
         self._restore_preferences()
         self.apply_config()
@@ -125,6 +128,7 @@ class PlayerApp:
     def apply_config(self):
         self.viz_on = bool(self.config.get("behavior", "visualizer_enabled", default=True))
         self.audio.viz_enabled = self.viz_on
+        self.trim_on = bool(self.config.get("behavior", "trim_memory", default=True))
 
     def _restore_preferences(self):
         b = self.config.get("behavior", default={}) or {}
@@ -192,6 +196,19 @@ class PlayerApp:
             self.viz = list(a.levels)
         else:
             self.viz = [v * 0.8 for v in self.viz]
+        self._auto_trim()
+
+    def _auto_trim(self):
+        """A cada ~1 min (e logo depois de começar uma faixa) devolve memória ociosa."""
+        if not self.trim_on:
+            return
+        a, now = self.audio, time.time()
+        due = now - self._trim_t > 60
+        if a.stage == "streaming" and a.gen != self._trim_gen and a.time_pos > 4:
+            due, self._trim_gen = True, a.gen
+        if due:
+            self._trim_t = now
+            memory.trim()
 
     # ------------------------------------------------------------ desenho
     def _safe_draw(self):
@@ -299,6 +316,7 @@ class PlayerApp:
                 if text in self._search_history:
                     self._search_history.remove(text)
                 self._search_history.append(text)
+                del self._search_history[:-50]            # histórico limitado
             if cb:
                 cb(text)
             return
@@ -354,13 +372,15 @@ def _curses_main(stdscr):
 def test_audio():
     """python main.py --test-audio : toca um beep para testar a placa de som."""
     try:
-        import numpy as np
+        import math
+        from array import array
         import sounddevice as sd
         sr = 44100
-        t = np.linspace(0, 0.4, int(sr * 0.4), False)
-        tone = (0.15 * np.sin(2 * np.pi * 660 * t)).astype(np.float32)
-        with sd.OutputStream(samplerate=sr, channels=1, dtype="float32") as out:
-            out.write(np.ascontiguousarray(tone.reshape(-1, 1)))
+        n = int(sr * 0.4)
+        tone = array("h", (int(0.15 * 32767 * math.sin(2 * math.pi * 660 * i / sr))
+                           for i in range(n)))
+        with sd.RawOutputStream(samplerate=sr, channels=1, dtype="int16") as out:
+            out.write(tone.tobytes())
         print("Áudio OK — você deve ter ouvido um beep.")
         return 0
     except Exception as e:

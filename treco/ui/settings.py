@@ -9,6 +9,7 @@ from .widgets import hline, put
 TOGGLES = [
     ("visualizer_enabled", "visualizer", "barras animadas (usa um pouco de CPU)"),
     ("show_memory", "RAM monitor", "mostra o uso de memória no topo"),
+    ("trim_memory", "RAM trim", "libera memória ociosa de tempos em tempos"),
 ]
 
 

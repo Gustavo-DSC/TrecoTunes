@@ -33,5 +33,8 @@ Aperte `?` dentro do app. Principais: `SPACE` pausa · `← →` ±10s · `> <` 
 `TAB` ou `1-5` troca de aba.
 
 ## Memória
-O app só carrega as bibliotecas pesadas (FFmpeg/numpy/áudio/rede) quando precisa.
+Sem numpy: o visualizador é feito em Python puro e o volume usa `audioop`.
+O app só carrega as bibliotecas pesadas (FFmpeg/áudio/rede) quando precisa, limita
+buscas simultâneas, mantém caches e log com tamanho máximo e, a cada ~1 min, devolve ao
+sistema a memória ociosa (CONFIG > RAM trim).
 O consumo aparece no topo ("RAM xx MB"); dá para desligar em CONFIG.

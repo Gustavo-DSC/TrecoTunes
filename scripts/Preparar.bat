@@ -53,6 +53,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
+".venv\Scripts\python.exe" -m pip uninstall -y numpy >nul 2>&1
+
 echo.
 echo ========================================
 echo PREPARACAO CONCLUIDA!

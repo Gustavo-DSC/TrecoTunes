@@ -23,6 +23,7 @@ class ConfigManager:
         "behavior": {
             "visualizer_enabled": True,   # barras animadas (gasta um pouco de CPU)
             "show_memory": True,          # mostra o uso de RAM no cabeçalho
+            "trim_memory": True,          # devolve ao Windows a memória ociosa (a cada ~1 min)
             "history_limit": 50,
             "home_cache_hours": 6,        # a Home só busca recomendações após esse tempo
             "volume": 50,

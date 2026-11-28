@@ -15,6 +15,7 @@ class YouTubeService:
     def __init__(self):
         self._cache = OrderedDict()     # query -> lista de resultados
         self._lock = threading.Lock()
+        self._net = threading.Semaphore(2)   # no máximo 2 consultas de rede ao mesmo tempo
 
     def search(self, query, total=50):
         """Lista de {'title','url','duration'}. Resultados ficam em cache por consulta."""
@@ -26,6 +27,16 @@ class YouTubeService:
             if cached is not None:
                 self._cache.move_to_end(query)
                 return list(cached[:total])
+        try:
+            with self._net:
+                return self._search_net(query, total)
+        except Exception as e:
+            log(f"SEARCH erro: {e}")
+            return []
+        finally:
+            gc.collect()
+
+    def _search_net(self, query, total):
         try:
             from pytubefix import Search
             s = Search(query)
@@ -68,8 +79,6 @@ class YouTubeService:
         except Exception as e:
             log(f"SEARCH erro: {e}")
             return []
-        finally:
-            gc.collect()
 
     def forget(self, query):
         with self._lock:
@@ -77,6 +86,13 @@ class YouTubeService:
 
     def audio_info(self, video_url):
         """Resolve a URL direta do stream de áudio."""
+        try:
+            with self._net:
+                return self._audio_info_net(video_url)
+        finally:
+            gc.collect()
+
+    def _audio_info_net(self, video_url):
         try:
             from pytubefix import YouTube
             yt = YouTube(video_url)
@@ -96,5 +112,3 @@ class YouTubeService:
                 return AudioInfo(None, None, 0, "live")
             log(f"YT erro: {e}")
             return AudioInfo(None, None, 0, "fail")
-        finally:
-            gc.collect()

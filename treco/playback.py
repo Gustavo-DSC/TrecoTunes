@@ -7,6 +7,7 @@ Fontes de reprodução (`source`):
 """
 import random
 import threading
+import time
 
 from .logger import log
 from .utils import fmt_time
@@ -65,6 +66,9 @@ class PlaybackController:
 
         def work():
             try:
+                time.sleep(0.15)                         # segurou ">"? só a última faixa é resolvida
+                if req != self._req:
+                    return
                 info = self.youtube.audio_info(url)
                 if req != self._req:
                     return                               # usuário escolheu outra faixa
